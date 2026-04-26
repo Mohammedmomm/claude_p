@@ -1,129 +1,139 @@
 const router = require('express').Router();
 const auth   = require('../middleware/auth');
-const { v4: uuid } = require('uuid');
+const pool   = require('../db');
+
+function buildImg(category, firstLetter) {
+  const map = { Electronics:['#3b82f6','📱'], Clothing:['#ec4899','👕'], Food:['#22c55e','🍎'], Home:['#f59e0b','🏠'], Sports:['#ef4444','⚽'], Books:['#8b5cf6','📚'], Beauty:['#f472b6','💄'] };
+  const [color, emoji] = map[category] || ['#64748b','📦'];
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="400" height="400"><rect width="400" height="400" fill="${color}" opacity="0.7" rx="20"/><text x="200" y="220" text-anchor="middle" dominant-baseline="middle" font-size="120" font-family="system-ui">${emoji}</text></svg>`;
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+}
+
+const fmt = (p) => ({
+  id: p.id, nameEn: p.name_en, nameAr: p.name_ar, descEn: p.desc_en, descAr: p.desc_ar,
+  category: p.category, price: +p.price, stock: p.stock, image: p.image,
+  sellerId: p.seller_id, isWholesale: p.is_wholesale,
+  wholesalePrice: p.wholesale_price ? +p.wholesale_price : null,
+  wholesaleMinParticipants: p.wholesale_min_participants,
+  wholesaleDeadline: p.wholesale_deadline,
+  featured: p.is_featured, tags: p.tags || [], rating: +p.rating,
+  createdAt: p.created_at,
+  seller: p.seller_name ? { id: p.seller_id, name: p.seller_name, phone: p.seller_phone, role: p.seller_role } : null,
+});
 
 // GET /api/products
-router.get('/', (req, res) => {
+router.get('/', async (req, res) => {
   try {
-    let items = [...req.app.locals.products];
     const { category, search, featured, sellerId, page = 1, limit = 12 } = req.query;
-    if (category && category !== 'All') items = items.filter(p => p.category === category);
-    if (featured === 'true') items = items.filter(p => p.featured);
-    if (sellerId) items = items.filter(p => p.sellerId === sellerId);
+    const conds = []; const vals = [];
+    if (category && category !== 'All') { conds.push(`p.category=$${vals.length+1}`); vals.push(category); }
+    if (featured === 'true') { conds.push(`p.is_featured=true`); }
+    if (sellerId) { conds.push(`p.seller_id=$${vals.length+1}`); vals.push(sellerId); }
     if (search) {
-      const q = search.toLowerCase();
-      items = items.filter(p =>
-        p.nameEn.toLowerCase().includes(q) ||
-        p.nameAr.includes(q) ||
-        p.category.toLowerCase().includes(q) ||
-        (p.tags || []).some(t => t.includes(q))
-      );
+      conds.push(`(p.name_en ILIKE $${vals.length+1} OR p.name_ar ILIKE $${vals.length+1} OR p.category ILIKE $${vals.length+1} OR $${vals.length+1} ILIKE ANY(p.tags))`);
+      vals.push(`%${search}%`);
     }
-    const total = items.length;
-    const start = (Number(page) - 1) * Number(limit);
-    const paginated = items.slice(start, start + Number(limit));
-    res.json({ products: paginated, total, page: Number(page), pages: Math.ceil(total / Number(limit)) });
-  } catch (e) { res.status(500).json({ error: 'Server error' }); }
+    const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
+    const countRes = await pool.query(`SELECT COUNT(*) FROM products p ${where}`, vals);
+    const total = +countRes.rows[0].count;
+    const offset = (Number(page)-1) * Number(limit);
+    vals.push(Number(limit), offset);
+    const { rows } = await pool.query(
+      `SELECT p.*, u.name AS seller_name, u.phone AS seller_phone, u.role AS seller_role
+       FROM products p LEFT JOIN users u ON u.id=p.seller_id
+       ${where} ORDER BY p.created_at DESC LIMIT $${vals.length-1} OFFSET $${vals.length}`, vals
+    );
+    res.json({ products: rows.map(fmt), total, page: Number(page), pages: Math.ceil(total/Number(limit)) });
+  } catch(e) { console.error(e); res.status(500).json({ error: 'Server error' }); }
 });
 
 // GET /api/products/categories
-router.get('/categories', (req, res) => {
-  const cats = [...new Set(req.app.locals.products.map(p => p.category))];
-  res.json({ categories: cats });
+router.get('/categories', async (_req, res) => {
+  try {
+    const { rows } = await pool.query(`SELECT DISTINCT category FROM products ORDER BY category`);
+    res.json({ categories: rows.map(r => r.category) });
+  } catch { res.status(500).json({ error: 'Server error' }); }
 });
 
 // GET /api/products/:id
-router.get('/:id', (req, res) => {
-  const product = req.app.locals.products.find(p => p.id === req.params.id);
-  if (!product) return res.status(404).json({ error: 'Product not found' });
-
-  // Attach seller info
-  const seller = req.app.locals.users.find(u => u.id === product.sellerId);
-  const productWithSeller = {
-    ...product,
-    seller: seller ? { id: seller.id, name: seller.name, phone: seller.phone, role: seller.role } : null,
-  };
-  res.json({ product: productWithSeller });
+router.get('/:id', async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT p.*, u.name AS seller_name, u.phone AS seller_phone, u.role AS seller_role
+       FROM products p LEFT JOIN users u ON u.id=p.seller_id WHERE p.id=$1`, [req.params.id]
+    );
+    if (!rows[0]) return res.status(404).json({ error: 'Product not found' });
+    res.json({ product: fmt(rows[0]) });
+  } catch { res.status(500).json({ error: 'Server error' }); }
 });
 
-// POST /api/products  — seller creates listing
-router.post('/', auth, (req, res) => {
+// POST /api/products
+router.post('/', auth, async (req, res) => {
   try {
     if (req.user.role !== 'seller') return res.status(403).json({ error: 'Only sellers can post listings' });
     const { nameEn, nameAr, descEn, descAr, category, price, wholesalePrice, stock, image, isWholesale, wholesaleDuration, wholesaleMinParticipants, tags } = req.body;
     if (!nameEn || !category || !price) return res.status(400).json({ error: 'nameEn, category, price required' });
-
-    const categoryColors = { Electronics:'#3b82f6', Clothing:'#ec4899', Food:'#22c55e', Home:'#f59e0b', Sports:'#ef4444', Books:'#8b5cf6', Beauty:'#f472b6' };
-    const color = categoryColors[category] || '#64748b';
-    const defaultImage = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="400" height="400"><rect width="400" height="400" fill="${color}" opacity="0.6" rx="20"/><text x="200" y="220" text-anchor="middle" dominant-baseline="middle" font-size="60" font-family="system-ui" fill="white">${nameEn[0]?.toUpperCase()}</text></svg>`)}`;
-
-    const durationMap = { '4h': 4*60*60*1000, '1d': 24*60*60*1000, '2d': 48*60*60*1000, '1w': 7*24*60*60*1000 };
-    const deadline = isWholesale && wholesaleDuration ? new Date(Date.now() + (durationMap[wholesaleDuration] || durationMap['1d'])).toISOString() : null;
-
-    const product = {
-      id: uuid(),
-      nameEn,
-      nameAr: nameAr || nameEn,
-      descEn: descEn || '',
-      descAr: descAr || descEn || '',
-      category,
-      price: Number(price),
-      wholesalePrice: wholesalePrice ? Number(wholesalePrice) : null,
-      stock: Number(stock) || 10,
-      image: image || defaultImage,
-      rating: 0,
-      reviewCount: 0,
-      isWholesale: !!isWholesale,
-      wholesaleDeadline: deadline,
-      wholesaleCurrentParticipants: 0,
-      wholesaleMinParticipants: Number(wholesaleMinParticipants) || 10,
-      wholesaleDuration: wholesaleDuration || '1d',
-      sellerId: req.user.id,
-      tags: tags || [],
-      featured: false,
-      createdAt: new Date().toISOString(),
-    };
-    req.app.locals.products.unshift(product);
-    res.status(201).json({ product });
-  } catch (e) { res.status(500).json({ error: 'Server error' }); }
+    const durationMap = { '4h':4*3600000, '1d':86400000, '2d':172800000, '1w':604800000 };
+    const deadline = isWholesale && wholesaleDuration ? new Date(Date.now()+(durationMap[wholesaleDuration]||86400000)) : null;
+    const finalImage = image || buildImg(category, nameEn[0]);
+    const { rows } = await pool.query(
+      `INSERT INTO products (name_en,name_ar,desc_en,desc_ar,category,price,wholesale_price,stock,image,seller_id,is_wholesale,wholesale_min_participants,wholesale_deadline,tags)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *`,
+      [nameEn, nameAr||nameEn, descEn||'', descAr||descEn||'', category, +price, wholesalePrice?+wholesalePrice:null, +stock||10, finalImage, req.user.id, !!isWholesale, +wholesaleMinParticipants||10, deadline, tags||[]]
+    );
+    res.status(201).json({ product: fmt(rows[0]) });
+  } catch(e) { console.error(e); res.status(500).json({ error: 'Server error' }); }
 });
 
-// PUT /api/products/:id  — seller edits own listing
-router.put('/:id', auth, (req, res) => {
-  const product = req.app.locals.products.find(p => p.id === req.params.id);
-  if (!product) return res.status(404).json({ error: 'Product not found' });
-  if (product.sellerId !== req.user.id) return res.status(403).json({ error: 'Not your listing' });
-  const allowed = ['nameEn','nameAr','descEn','descAr','price','wholesalePrice','stock','image','isWholesale','wholesaleMinParticipants','tags'];
-  allowed.forEach(k => { if (req.body[k] !== undefined) product[k] = req.body[k]; });
-  res.json({ product });
+// PUT /api/products/:id
+router.put('/:id', auth, async (req, res) => {
+  try {
+    const { rows: existing } = await pool.query(`SELECT * FROM products WHERE id=$1`, [req.params.id]);
+    if (!existing[0]) return res.status(404).json({ error: 'Product not found' });
+    if (existing[0].seller_id !== req.user.id) return res.status(403).json({ error: 'Not your listing' });
+    const { nameEn, nameAr, descEn, descAr, price, wholesalePrice, stock, image, isWholesale, wholesaleMinParticipants, tags } = req.body;
+    const { rows } = await pool.query(
+      `UPDATE products SET name_en=COALESCE($1,name_en), name_ar=COALESCE($2,name_ar), desc_en=COALESCE($3,desc_en), desc_ar=COALESCE($4,desc_ar),
+       price=COALESCE($5,price), wholesale_price=COALESCE($6,wholesale_price), stock=COALESCE($7,stock), image=COALESCE($8,image),
+       is_wholesale=COALESCE($9,is_wholesale), wholesale_min_participants=COALESCE($10,wholesale_min_participants), tags=COALESCE($11,tags)
+       WHERE id=$12 RETURNING *`,
+      [nameEn||null, nameAr||null, descEn||null, descAr||null, price?+price:null, wholesalePrice?+wholesalePrice:null, stock?+stock:null, image||null, isWholesale??null, wholesaleMinParticipants?+wholesaleMinParticipants:null, tags||null, req.params.id]
+    );
+    res.json({ product: fmt(rows[0]) });
+  } catch { res.status(500).json({ error: 'Server error' }); }
 });
 
-// DELETE /api/products/:id  — seller deletes own listing
-router.delete('/:id', auth, (req, res) => {
-  const idx = req.app.locals.products.findIndex(p => p.id === req.params.id);
-  if (idx < 0) return res.status(404).json({ error: 'Product not found' });
-  if (req.app.locals.products[idx].sellerId !== req.user.id) return res.status(403).json({ error: 'Not your listing' });
-  req.app.locals.products.splice(idx, 1);
-  res.json({ message: 'Listing deleted' });
+// DELETE /api/products/:id
+router.delete('/:id', auth, async (req, res) => {
+  try {
+    const { rows } = await pool.query(`SELECT seller_id FROM products WHERE id=$1`, [req.params.id]);
+    if (!rows[0]) return res.status(404).json({ error: 'Product not found' });
+    if (rows[0].seller_id !== req.user.id && req.user.role !== 'admin') return res.status(403).json({ error: 'Not your listing' });
+    await pool.query(`DELETE FROM products WHERE id=$1`, [req.params.id]);
+    res.json({ message: 'Listing deleted' });
+  } catch { res.status(500).json({ error: 'Server error' }); }
 });
 
-// POST /api/products/:id/boost  — seller boosts listing (simulated)
-router.post('/:id/boost', auth, (req, res) => {
-  const product = req.app.locals.products.find(p => p.id === req.params.id);
-  if (!product) return res.status(404).json({ error: 'Product not found' });
-  if (product.sellerId !== req.user.id) return res.status(403).json({ error: 'Not your listing' });
-  product.featured = true;
-  product.boostedAt = new Date().toISOString();
-  res.json({ message: 'Listing boosted successfully', product });
+// POST /api/products/:id/boost
+router.post('/:id/boost', auth, async (req, res) => {
+  try {
+    const { rows } = await pool.query(`SELECT seller_id FROM products WHERE id=$1`, [req.params.id]);
+    if (!rows[0]) return res.status(404).json({ error: 'Product not found' });
+    if (rows[0].seller_id !== req.user.id) return res.status(403).json({ error: 'Not your listing' });
+    await pool.query(`UPDATE products SET is_featured=true WHERE id=$1`, [req.params.id]);
+    res.json({ message: 'Listing boosted successfully' });
+  } catch { res.status(500).json({ error: 'Server error' }); }
 });
 
-// POST /api/products/:id/reveal-phone  — reveal seller phone (auth required)
-router.post('/:id/reveal-phone', auth, (req, res) => {
-  const product = req.app.locals.products.find(p => p.id === req.params.id);
-  if (!product) return res.status(404).json({ error: 'Product not found' });
-  const seller = req.app.locals.users.find(u => u.id === product.sellerId);
-  if (!seller) return res.status(404).json({ error: 'Seller not found' });
-  res.json({ phone: seller.phone || '+963-11-000-0001' });
+// POST /api/products/:id/reveal-phone
+router.post('/:id/reveal-phone', auth, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT u.phone FROM products p JOIN users u ON u.id=p.seller_id WHERE p.id=$1`, [req.params.id]
+    );
+    if (!rows[0]) return res.status(404).json({ error: 'Product not found' });
+    res.json({ phone: rows[0].phone || '+963-11-000-0001' });
+  } catch { res.status(500).json({ error: 'Server error' }); }
 });
 
 module.exports = router;

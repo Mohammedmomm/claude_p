@@ -1,55 +1,66 @@
 const router = require('express').Router();
 const auth   = require('../middleware/auth');
-const { v4: uuid } = require('uuid');
+const pool   = require('../db');
 
 // GET /api/orders
-router.get('/', auth, (req, res) => {
-  const orders = req.app.locals.orders
-    .filter(o => o.userId === req.user.id)
-    .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-  res.json({ orders });
+router.get('/', auth, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT * FROM orders WHERE user_id=$1 ORDER BY created_at DESC`, [req.user.id]
+    );
+    res.json({ orders: rows.map(o => ({ ...o, createdAt: o.created_at })) });
+  } catch { res.status(500).json({ error: 'Server error' }); }
 });
 
 // GET /api/orders/:id
-router.get('/:id', auth, (req, res) => {
-  const order = req.app.locals.orders.find(o => o.id === req.params.id && o.userId === req.user.id);
-  if (!order) return res.status(404).json({ error: 'Order not found' });
-  res.json({ order });
+router.get('/:id', auth, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT * FROM orders WHERE id=$1 AND user_id=$2`, [req.params.id, req.user.id]
+    );
+    if (!rows[0]) return res.status(404).json({ error: 'Order not found' });
+    res.json({ order: { ...rows[0], createdAt: rows[0].created_at } });
+  } catch { res.status(500).json({ error: 'Server error' }); }
 });
 
 // POST /api/orders
-router.post('/', auth, (req, res) => {
-  const { paymentMethod = 'card', cardName = '', shippingAddress = {} } = req.body;
-  const cartItems = req.app.locals.carts[req.user.id] || [];
-  if (!cartItems.length) return res.status(400).json({ error: 'Cart is empty' });
+router.post('/', auth, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { paymentMethod = 'card', cardName = '', shippingAddress = {} } = req.body;
 
-  const products = req.app.locals.products;
-  const items = cartItems.map(item => {
-    const p = products.find(pr => pr.id === item.productId);
-    if (!p) return null;
-    const price = item.isWholesale && p.wholesalePrice ? p.wholesalePrice : p.price;
-    return { productId: item.productId, nameEn: p.nameEn, nameAr: p.nameAr, image: p.image, quantity: item.quantity, price, isWholesale: item.isWholesale };
-  }).filter(Boolean);
+    const { rows: cartRows } = await client.query(
+      `SELECT c.quantity, c.is_wholesale, p.id, p.name_en, p.name_ar, p.image, p.price, p.wholesale_price, p.stock
+       FROM carts c JOIN products p ON p.id=c.product_id WHERE c.user_id=$1`, [req.user.id]
+    );
+    if (!cartRows.length) return res.status(400).json({ error: 'Cart is empty' });
 
-  const total = items.reduce((s, i) => s + i.price * i.quantity, 0);
+    const items = cartRows.map(r => {
+      const price = r.is_wholesale && r.wholesale_price ? +r.wholesale_price : +r.price;
+      return { productId: r.id, nameEn: r.name_en, nameAr: r.name_ar, image: r.image, quantity: r.quantity, price, isWholesale: r.is_wholesale };
+    });
+    const total = items.reduce((s, i) => s + i.price * i.quantity, 0);
 
-  const order = {
-    id: uuid(),
-    userId: req.user.id,
-    items,
-    total: +total.toFixed(2),
-    paymentMethod,
-    cardName,
-    shippingAddress,
-    status: 'processing',
-    createdAt: new Date().toISOString(),
-    estimatedDelivery: new Date(Date.now() + 5 * 24 * 60 * 60 * 1000).toISOString(),
-  };
+    const { rows } = await client.query(
+      `INSERT INTO orders (user_id,items,total,status) VALUES ($1,$2,$3,'processing') RETURNING *`,
+      [req.user.id, JSON.stringify(items), +total.toFixed(2)]
+    );
+    await client.query(`DELETE FROM carts WHERE user_id=$1`, [req.user.id]);
+    await client.query('COMMIT');
 
-  req.app.locals.orders.push(order);
-  req.app.locals.carts[req.user.id] = [];
-
-  res.status(201).json({ order });
+    res.status(201).json({
+      order: {
+        ...rows[0], createdAt: rows[0].created_at,
+        paymentMethod, cardName, shippingAddress,
+        estimatedDelivery: new Date(Date.now() + 5*24*60*60*1000).toISOString(),
+      }
+    });
+  } catch(e) {
+    await client.query('ROLLBACK');
+    console.error(e);
+    res.status(500).json({ error: 'Server error' });
+  } finally { client.release(); }
 });
 
 module.exports = router;

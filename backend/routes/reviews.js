@@ -1,45 +1,40 @@
 const router = require('express').Router();
 const auth   = require('../middleware/auth');
-const { v4: uuid } = require('uuid');
+const pool   = require('../db');
 
 // GET /api/reviews/:productId
-router.get('/:productId', (req, res) => {
-  const reviews = req.app.locals.reviews
-    .filter(r => r.productId === req.params.productId)
-    .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-  res.json({ reviews });
+router.get('/:productId', async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT * FROM reviews WHERE product_id=$1 ORDER BY created_at DESC`, [req.params.productId]
+    );
+    res.json({ reviews: rows.map(r => ({ ...r, productId: r.product_id, userId: r.user_id, userName: r.user_name, createdAt: r.created_at })) });
+  } catch { res.status(500).json({ error: 'Server error' }); }
 });
 
 // POST /api/reviews
-router.post('/', auth, (req, res) => {
-  const { productId, rating, comment } = req.body;
-  if (!productId || !rating) return res.status(400).json({ error: 'productId and rating required' });
-  if (rating < 1 || rating > 5) return res.status(400).json({ error: 'Rating must be 1-5' });
-
-  const product = req.app.locals.products.find(p => p.id === productId);
-  if (!product) return res.status(404).json({ error: 'Product not found' });
-
-  const existing = req.app.locals.reviews.find(r => r.productId === productId && r.userId === req.user.id);
-  if (existing) return res.status(409).json({ error: 'You already reviewed this product' });
-
-  const user = req.app.locals.users.find(u => u.id === req.user.id);
-  const review = {
-    id: uuid(),
-    productId,
-    userId: req.user.id,
-    userName: user ? user.name : 'Anonymous',
-    rating: Number(rating),
-    comment: comment || '',
-    createdAt: new Date().toISOString(),
-  };
-  req.app.locals.reviews.push(review);
-
-  // Recalculate product rating
-  const productReviews = req.app.locals.reviews.filter(r => r.productId === productId);
-  product.rating = +(productReviews.reduce((s, r) => s + r.rating, 0) / productReviews.length).toFixed(1);
-  product.reviewCount = productReviews.length;
-
-  res.status(201).json({ review });
+router.post('/', auth, async (req, res) => {
+  try {
+    const { productId, rating, comment } = req.body;
+    if (!productId || !rating) return res.status(400).json({ error: 'productId and rating required' });
+    if (rating < 1 || rating > 5) return res.status(400).json({ error: 'Rating must be 1-5' });
+    const { rows: prod } = await pool.query(`SELECT id FROM products WHERE id=$1`, [productId]);
+    if (!prod[0]) return res.status(404).json({ error: 'Product not found' });
+    const { rows: user } = await pool.query(`SELECT name FROM users WHERE id=$1`, [req.user.id]);
+    const { rows } = await pool.query(
+      `INSERT INTO reviews (product_id,user_id,user_name,rating,comment) VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+      [productId, req.user.id, user[0]?.name || 'Anonymous', +rating, comment || '']
+    );
+    // Update product average rating
+    await pool.query(
+      `UPDATE products SET rating=(SELECT AVG(rating) FROM reviews WHERE product_id=$1) WHERE id=$1`, [productId]
+    );
+    const r = rows[0];
+    res.status(201).json({ review: { ...r, productId: r.product_id, userId: r.user_id, userName: r.user_name, createdAt: r.created_at } });
+  } catch(e) {
+    if (e.code === '23505') return res.status(409).json({ error: 'You already reviewed this product' });
+    res.status(500).json({ error: 'Server error' });
+  }
 });
 
 module.exports = router;
