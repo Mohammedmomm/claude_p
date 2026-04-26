@@ -25,6 +25,7 @@ const Contact = React.lazy(() => import('./pages/Contact'));
 const FAQ = React.lazy(() => import('./pages/FAQ'));
 const PrivacyPolicy = React.lazy(() => import('./pages/PrivacyPolicy'));
 const Terms = React.lazy(() => import('./pages/Terms'));
+const AddListing = React.lazy(() => import('./pages/AddListing'));
 
 /**
  * PrivateRoute: redirects to /login if user is not authenticated
@@ -91,6 +92,7 @@ const AppRoutes = () => {
         <Route path="/settings" element={<PrivateRoute><Settings /></PrivateRoute>} />
         <Route path="/chat" element={<PrivateRoute><Chat /></PrivateRoute>} />
         <Route path="/chat/:userId" element={<PrivateRoute><Chat /></PrivateRoute>} />
+        <Route path="/sell" element={<PrivateRoute><AddListing /></PrivateRoute>} />
 
         {/* Public info pages */}
         <Route path="/about" element={<AboutUs />} />

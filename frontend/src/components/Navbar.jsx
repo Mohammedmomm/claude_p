@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import {
   ShoppingCart, Search, Moon, Sun, Globe, User, Menu, X,
-  Heart, MessageCircle, Package, Settings, LogOut,
+  Heart, MessageCircle, Package, Settings, LogOut, Plus,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useCart } from '../contexts/CartContext';
@@ -154,6 +154,17 @@ const Navbar = () => {
 
             {user ? (
               <>
+                {/* Sell Now button — sellers only */}
+                {user.role === 'seller' && (
+                  <Link
+                    to="/sell"
+                    className="hidden sm:flex items-center gap-1.5 px-3 py-2 rounded-xl bg-gradient-to-r from-red-500 to-orange-500 hover:from-red-600 hover:to-orange-600 text-white text-sm font-semibold transition-all shadow-sm hover:shadow"
+                  >
+                    <Plus className="w-4 h-4" />
+                    <span>{language === 'ar' ? 'أضف إعلان' : 'Sell Now'}</span>
+                  </Link>
+                )}
+
                 {/* Cart */}
                 <Link
                   to="/cart"
@@ -200,6 +211,7 @@ const Navbar = () => {
                         { to: '/wishlist', icon: Heart, label: t('nav.wishlist') },
                         { to: '/chat', icon: MessageCircle, label: t('nav.chat') },
                         { to: '/settings', icon: Settings, label: t('nav.settings') },
+                        ...(user?.role === 'seller' ? [{ to: '/sell', icon: Plus, label: language === 'ar' ? 'أضف إعلان' : 'Sell Now' }] : []),
                       ].map(({ to, icon: Icon, label }) => (
                         <Link
                           key={to}
@@ -301,6 +313,7 @@ const Navbar = () => {
                   { to: '/orders', icon: Package, label: t('nav.orders') },
                   { to: '/chat', icon: MessageCircle, label: t('nav.chat') },
                   { to: '/settings', icon: Settings, label: t('nav.settings') },
+                  ...(user?.role === 'seller' ? [{ to: '/sell', icon: Plus, label: language === 'ar' ? 'أضف إعلان' : 'Sell Now' }] : []),
                 ].map(({ to, icon: Icon, label, badge }) => (
                   <Link
                     key={to}

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useLocation } from 'react-router-dom';
 import { Search, SlidersHorizontal, ChevronDown } from 'lucide-react';
 import toast from 'react-hot-toast';
 import Navbar from '../components/Navbar';
@@ -21,13 +21,18 @@ export default function Home() {
   const { addToCart } = useCart();
   const { theme } = useTheme();
   const navigate = useNavigate();
+  const location = useLocation();
+
+  // Read initial filters from URL params
+  const urlParams = new URLSearchParams(location.search);
 
   const [products, setProducts]         = useState([]);
   const [wholesale, setWholesale]       = useState([]);
   const [loading, setLoading]           = useState(true);
   const [wishlistIds, setWishlistIds]   = useState([]);
-  const [search, setSearch]             = useState('');
-  const [category, setCategory]         = useState('All');
+  const [search, setSearch]             = useState(urlParams.get('search') || '');
+  const [category, setCategory]         = useState(urlParams.get('category') || 'All');
+  const [sellerId, setSellerId]         = useState(urlParams.get('sellerId') || '');
   const [sort, setSort]                 = useState('newest');
   const [page, setPage]                 = useState(1);
   const [totalPages, setTotalPages]     = useState(1);
@@ -40,6 +45,7 @@ export default function Home() {
       const params = { page, limit: 12 };
       if (category !== 'All') params.category = category;
       if (search.trim()) params.search = search.trim();
+      if (sellerId) params.sellerId = sellerId;
       const { data } = await api.get('/products', { params });
       let items = data.products || [];
       if (sort === 'price_low')  items = [...items].sort((a, b) => a.price - b.price);
@@ -49,7 +55,7 @@ export default function Home() {
       setTotalPages(data.pages || 1);
     } catch { toast.error(t('common.error')); }
     finally { setLoading(false); }
-  }, [page, category, search, sort, t]);
+  }, [page, category, search, sellerId, sort, t]);
 
   useEffect(() => { fetchProducts(); }, [fetchProducts]);
 
